@@ -1,0 +1,276 @@
+---
+title: "An Analysis of Austin Open Data"
+author: "Cong Cong"
+date: "September 1, 2019"
+output:
+  html_document: default
+  toc: true
+---
+```{r setup, include=FALSE, message = FALSE, warning = FALSE}
+# Housekeeping 
+for (pkg in c("httr", "lubridate", "ggplot2","stringr", "dplyr",
+              "tidyr", "readxl", "jsonlite", "purrr", "ggalluvial")) {
+  library(pkg, character.only = TRUE)
+}
+rm(list = "pkg")
+
+#Controlling figure output in markdown
+knitr::opts_chunk$set(
+  out.width = '60%',
+  fig.align="center",
+  cache = FALSE
+)
+# Set default theme for ggplot2
+theme_set(theme_classic() + theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom"))
+
+# Set Scientific notation output for knitr
+options(scipen = 9999)
+```
+
+Public-facing data portals are increasingly common among local governments. This script explores the content of the open data portal of Austin, TX (http://data.austintexas.gov) by collecting all data provided on the platform through Socrata API and characterizing data provision and demand.  
+
+```{r functions, include=FALSE, message = FALSE, warning = FALSE}
+# Collect detailed information about the repository contents
+get_content <- function(dm = "data.austintexas.gov", limit = 10000) {
+  "http://api.us.socrata.com/api/catalog/v1?domains=${dm}&limit=${limit}" %>%
+    str_interp() %>%
+    httr::GET() %>%
+    content("text") %>%
+    fromJSON(flatten = TRUE)
+}
+
+# Transform the stat to percentage
+show_percent <- function(x){
+  paste0(round(x, 3)*100, "%")
+}
+```
+
+
+```{r, message = FALSE, warning = FALSE}
+# Download Austin data
+city <- get_content()
+
+# Extract interested attributes and put them one data frame
+austin <-  tibble(
+  dataset = city$results$resource.name,
+  category = city$results$classification.domain_category,
+  tags = city$results$classification.domain_tags,
+  datatype = city$results$resource.type,
+  download = city$results$resource.download_count,
+  pageview_last_week = city$results$resource.page_views.page_views_last_week,
+  pageview_last_month = city$results$resource.page_views.page_views_last_month,
+  pageview_total = city$results$resource.page_views.page_views_total,
+  last_update = city$results$resource.updatedAt
+)
+```
+
+### Descriptive Stats and Variable Profiles
+ - Number of datasets, unique categories and tags:  
+There are `r length(austin$dataset)` datasets published on this portal. Usually the data providers assign datasets with categories and tags to help users to understand what is being provided and discover individual datasets.  
+
+```{r, message = FALSE, warning = FALSE}
+tibble(Number_of_datasets = length(austin$dataset),
+       Unique_categories = austin$category %>% na.omit() %>%
+         tolower() %>% unique() %>% length(),
+       Unique_tags = austin$tags %>% unlist() %>% 
+         tolower() %>% unique() %>% length()) %>% 
+  knitr::kable() %>% kableExtra::kable_styling(full_width = F)
+```
+
+ - Missing values  
+We evaluate the completeness of the data provided by assessing the completion of various data attributes.  
+
+```{r, message = FALSE, warning = FALSE}
+tibble(
+  Variable = names(austin),
+  Missing = austin %>% map_dbl(.x = ., ~is.na(.x) %>% sum()),
+  Completeness = austin %>% map_dbl(.x = ., ~is.na(.x) %>% mean())) %>%
+  mutate(
+    Completeness = show_percent(1-Completeness)
+  )%>% 
+  knitr::kable() %>% kableExtra::kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+ - Count of datasets in each category  
+Categories help users to discover potentially useful information by narrowing their search to a subset of the total datasets available on the repository that have been assigned to one or more a small number of substantive groups. The table below shows how many datasets are assigned to each category.
+
+```{r}
+table(austin$category) %>%
+  as.data.frame(.) %>%
+  setNames(c("Category", "Number of datasets")) %>%
+  arrange(desc(`Number of datasets`)) %>% 
+  mutate(Percentage = show_percent(`Number of datasets`/nrow(austin))) %>%
+  knitr::kable() %>% kableExtra::kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+ - Count of datasets under each type of tag (top 20 displayed)
+Tags are a more flexible way to document and describe the contents of a dataset and as a result, tend to be more numerous and specific. There are `r sum(lapply(austin$tags, length) == 0)` out of `r length(austin$tags)` datasets that have no tags. However, of all tagged datasets, those related to government administration (e.g., government report and performance metrics), emergency management (e.g., Austin-Travis County Emergency Medical Services (ATCEMS), 911, police), and city services (e.g., power and water supply, transportation and mobility) were the most likely to be provided.
+
+```{r}
+austin$tags %>% unlist() %>% table() %>%
+  as.data.frame(.) %>%
+  setNames(c("Tag", "Number of datasets")) %>%
+  arrange(desc(`Number of datasets`)) %>% 
+  head(.,20) %>%
+  knitr::kable() %>% kableExtra::kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+ - Proportion of datatypes
+Socrata creates data formats unique to the platform with names like “dataset”, “map”, “story”, and “file”, in addition to offer download of the raw resources. The Socrata “dataset” format is in most cases machine-processable tabular data, the “file” and “document” formats represent conventional formats (e.g., .pdf. .xls), while “map”, “chart”, “story” and “datalens” are dynamic visualizations or data analytics provided directly on the data portal.
+Here in our study, the types of "dataset" and "story" are of the largest share among all data formats.   
+
+```{r}
+df <- table(austin$datatype) %>% prop.table() %>%
+  as.data.frame(.) %>%
+  setNames(c("Datatype", "Percentage")) %>%
+  arrange(desc(`Percentage`))
+
+ggplot(df, aes(x = 2, y = Percentage, fill = Datatype)) +
+  geom_bar(width = 1,  stat = "identity",  color = "white") +
+  coord_polar("y", start = 0) +
+  geom_text(aes(y = Percentage, label = paste0(round(Percentage, 2)*100, "%")), position = position_stack(vjust = 0.5)) +
+  xlim(0.5, 2.5) +
+  xlab("Datatype") +
+  ylab("Percent") +
+  theme(legend.position = "right",
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid  = element_blank())
+```
+
+ - Distributions of number of downloads
+Socrata tallies the number of downloads of each dataset since when the the dataset was published. These can be good proxies of the needs and interest of the public. The download statistics ranges from zero to `r max(austin$download)` with a mean of `r mean(austin$download)`and a median of `r median(austin$download)`. In the meantime, `r round(sum(austin$download == 0, na.rm = TRUE)/length(austin$download),4)*100` percent of the datasets have never been downloaded.
+
+```{r}
+ggplot(austin) +
+  geom_violin(aes(x = factor("datasets"), y = download), trim = FALSE, alpha = 0.5, na.rm = TRUE) +
+  geom_boxplot(aes(x = factor("datasets"), y = download), colour = "black", width = .16, alpha = 0.8, na.rm = TRUE) + labs(
+    x = element_blank(),
+    y = "Count",
+    title = "Distribution of Download Numbers"
+  ) +
+  #scale_fill_viridis_d() +
+  coord_flip() +
+  theme(legend.position = "none")
+```
+
+ - Distribution of number of pageviews
+Similarly, Socrata provides weekly, monthly and total pageview tallies showing how many times each dataset was viewed online. The total pageview number ranges from zero to `r max(austin$pageview_total)` with a mean of `r mean(austin$pageview_total)` and a median of `r median(austin$pageview_total)`. `r round(sum(austin$pageview_total < 50, na.rm = TRUE)/length(austin$pageview_total),4)*100` percent of the datasets have been viewed less than 50 times since being published.
+
+```{r}
+ggplot(austin) +
+  geom_violin(aes(x = factor("datasets"), y = pageview_total), trim = FALSE, alpha = 0.5) +
+  geom_boxplot(aes(x = factor("datasets"), y = pageview_total), colour = "black", width = .16, alpha = 0.8) +
+  labs(
+    x = element_blank(),
+    y = "Count",
+    title = "Distribution of Total Pageview Numbers"
+  ) +
+  scale_fill_viridis_d() +
+  coord_flip() +
+  theme(legend.position = "none")
+```
+
+### Research questions  
+####1. Are the largest categories the ones that are mostly interested by the public?####   
+Urban studies have been critical of the “bias toward the supply side” and lack of “sufficient attention to the user perspective” in the way that open government data initiatives are implemented (Dawes et al., 2016). There is a chance that cities publish data that are easy to share, but are not necessarily of interest to an audience external to government.  
+Here we compile the supply (number of datasets under each category) and demand (total number of times that these datasets are downloaded and viewed) of each category, rank them by the amount of supply, download and pageview, and visualize the discrepency between these three features in the following graph.
+
+```{r}
+# Categories provided and used
+category_comparison <- austin %>% select(category, download, pageview_total) %>%
+  na.omit() %>% 
+  group_by(category) %>%
+  summarise(provided = n(),
+            downloaded = sum(download),
+            viewed = sum(pageview_total)) %>%
+  mutate(provided_rank = dense_rank(desc(provided)),
+         download_rank = dense_rank(desc(downloaded)),
+         change1 = ifelse(download_rank - provided_rank> 1, "up", "down"),
+         pageview_rank = dense_rank(desc(viewed)),
+         change2 = ifelse(pageview_rank - provided_rank> 1, "up", "down")) 
+category_comparison %>% select(-c(change1, change2)) %>% head() %>%
+  knitr::kable() %>% kableExtra::kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+```{r, message = FALSE, warning = FALSE, out.width = '90%'}
+supply_lable <- category_comparison[order(category_comparison$provided, decreasing = TRUE),]$category %>% rev()
+
+ggplot(category_comparison, 
+       aes(axis1 = pageview_rank, axis2 = provided_rank , axis3 = download_rank)) +
+  geom_alluvium(aes(fill = change1)) +
+  geom_alluvium(aes(fill = change2)) +
+  scale_x_discrete(expand = c(0.1, 0)) +
+  annotate("text", x = c(1,2,3), y = 19, label = c("Rank in Pageview","Rank in Supply","Rank in Download"), size = 3.5, fontface =2)+
+  annotate("text", x = 2, y = seq(0.6,18,1), size = 3,
+           label = supply_lable)+
+  annotate("text", x = 3.2, y = seq(0.5,18,1), label = seq(18,1,-1), size = 3)+
+  annotate("text", x = 0.8, y = seq(0.5,18,1), label = seq(18,1,-1), size = 3)+
+  ggtitle("Change of ranking in categories supplied, downloaded and viewed") +
+  theme(
+    axis.title = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "none"
+)
+
+```
+
+The stack in the middle of the graph is the ranking based on the number of datasets in each category. The columns on the left and right are the rankings of page views and number of downloads. The colored curve indicate the change of rankings between each two features. Overall, a arch-shaped curve means the category has a lot of datasets in supply but is not interested by the public, while a U-shaped curve indicates that the category of less priority in supply but is more interested.
+
+The category of Public Safety which includes datasets like Annual Crime Dataset, Austin Fire Station Map, Traffic Fatalities for each year is the largest category on this open data portal, probably because these datasets are easy to gather from standard administrative reporting routines. They are not much viewed but are frequently downloaded, probably for research and analysis purpose.
+
+The Environment category includes water quality data in the natural creeks, aquifers and lakes in the Austin area. These data are also easy to share as they are directly migrated from existing field sample database and of less privacy concerns, but they ranks low in both pageview and download. 
+
+The categories that rank high in demand but average in supply include Utilities and City Services, Recreation and Culture, and Transportation and Mobility. At the very least, the mismatch could be explained by the appealing content of these data to the communities, and less technical barrier of using and viewing these data. For example, certain types of datasets that are in standard formats (e.g. 311, GTFS), or are visualizations provided directly on the data portal (e.g. pool maps).
+
+**2.What are the most and least popular datatypes in terms of being viewed and downloaded?**   
+
+The format in which open data are provided is consequential in that many formats presuppose ways to access and use the underlying information. Machine-readable data formats ("dataset" on Socrata) invite civic-minded developers to build products and cultivate values around them, while online visualization, data stories (narrative), and mapping are more accessible to the public as they remove technical demands for non-technical users.  
+Here we compare and contrast the datasets in each format and the frequency that they are downloaded and viewed. 
+
+```{r, warning = FALSE}
+datatype_comparison <- austin %>% group_by(datatype) %>%
+  summarize(average_number_of_download = mean(download, na.rm = TRUE),
+            number_of_datasets = n()) %>%
+  mutate(average_number_of_download = average_number_of_download *100/nrow(austin),
+         number_of_datasets = number_of_datasets *100/nrow(austin),
+         number_of_datasets = -1 * number_of_datasets) %>%
+  gather(key = "facet", value = "value", average_number_of_download:number_of_datasets)
+ggplot(datatype_comparison, aes(x = reorder(datatype, value), y = value, fill = facet)) + 
+  geom_bar(subset = (datatype_comparison$facet == "average_number_of_download"), stat = "identity") + 
+  geom_bar(subset = (datatype_comparison$facet == "number_of_datasets"), stat = "identity") + 
+  scale_y_continuous(breaks = seq(-100, 100, 20), 
+                     labels = as.character(c(seq(100, 0, -20), seq(20, 100, 20)))) + 
+  labs(
+    x = "Datatypes",
+    y = "Percent in supply vs Percent in number of download") +
+  coord_flip() 
+```
+
+
+```{r, warning = FALSE}
+datatype_comparison <- austin %>% group_by(datatype) %>%
+  summarize(average_number_of_pageview = sum(pageview_total, na.rm = TRUE),
+            number_of_datasets = n()) %>%
+  mutate(average_number_of_pageview = average_number_of_pageview *100/sum(austin$pageview_total),
+         number_of_datasets = number_of_datasets *100/nrow(austin),
+         number_of_datasets = -1 * number_of_datasets) %>%
+  gather(key = "facet", value = "value", average_number_of_pageview:number_of_datasets)
+ggplot(datatype_comparison, aes(x = reorder(datatype, value), y = value, fill = facet)) + 
+  geom_bar(subset = (datatype_comparison$facet == "average_number_of_pageview"), stat = "identity") + 
+  geom_bar(subset = (datatype_comparison$facet == "number_of_datasets"), stat = "identity") + 
+  scale_y_continuous(breaks = seq(-100, 100, 20), 
+                     labels = as.character(c(seq(100, 0, -20), seq(20, 100, 20)))) + 
+  labs(
+    x = "Datatypes",
+    y = "Percent in supply vs Percent in number of pageview") +
+  coord_flip() 
+```
+
+Dataset, story, map, and chart are the formats that are in high supply, and also mostly welcomed in terms of being downloaded and viewed. Among them, data in the form of "dataset" (presumably as .csv, .xml, or .rdf files) are built for use and reuse, while map and story that visualize geospatial data are more useful for viewing. 
+
+
+
+
+
